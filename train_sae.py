@@ -22,6 +22,15 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output_dir", default="./outputs")
+    # AuxK loss (Gao et al. 2024) to prevent dead features
+    parser.add_argument("--auxk", type=int, default=None,
+                        help="AuxK: number of dead features to activate on residual per step. "
+                             "Recommended: k//2. Set to 0 to disable.")
+    parser.add_argument("--auxk_coef", type=float, default=1/32,
+                        help="Weight on the AuxK auxiliary loss (default: 1/32 per the paper)")
+    parser.add_argument("--dead_steps_threshold", type=int, default=None,
+                        help="Steps without activation before a feature is considered dead "
+                             "(default: 2 * steps_per_epoch)")
     return parser.parse_args()
 
 
@@ -39,6 +48,45 @@ def val_mse(model, val_tensor, batch_size, device):
     return total_loss / total_n
 
 
+def auxk_loss(model, batch, recons, dead_mask, k_aux):
+    """
+    AuxK auxiliary loss (Gao et al. 2024, §3.3).
+
+    Among features that haven't activated recently (dead_mask), activate the
+    top-k_aux on the reconstruction residual and compute MSE on that residual.
+    This gives dead features gradient without interfering with the main loss.
+
+    dead_mask: bool tensor of shape (M,), True = dead feature
+    k_aux: how many dead features to activate per sample
+    """
+    n_dead = dead_mask.sum().item()
+    if n_dead == 0:
+        return torch.tensor(0.0, device=batch.device)
+
+    k_aux = min(k_aux, n_dead)
+
+    residual = (batch - recons).detach()  # shape (B, D)
+
+    # Encode residual using only dead features
+    # encode_pre_act gives (B, M); we'll zero out live features
+    with torch.no_grad():
+        x_pre, _ = model.preprocess(batch)
+    pre_act = model.encode_pre_act(x_pre)           # (B, M)
+    pre_act_dead = pre_act[:, dead_mask]             # (B, n_dead)
+
+    # TopK among dead features only
+    topk = torch.topk(pre_act_dead, k=k_aux, dim=-1)
+    values = torch.relu(topk.values)
+    aux_latents = torch.zeros_like(pre_act_dead)
+    aux_latents.scatter_(-1, topk.indices, values)  # (B, n_dead)
+
+    # Decode using dead decoder columns only
+    dead_decoder = model.decoder.weight[:, dead_mask]  # (D, n_dead)
+    aux_recons = aux_latents @ dead_decoder.t()         # (B, D)
+
+    return ((aux_recons - residual) ** 2).mean()
+
+
 def train_fold(fold_idx, train_tensor, val_tensor, args, device):
     D = train_tensor.shape[1]
     model = Autoencoder(
@@ -50,8 +98,10 @@ def train_fold(fold_idx, train_tensor, val_tensor, args, device):
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
+    auxk = args.auxk if args.auxk is not None else args.k // 2
+    use_auxk = auxk > 0
     print(f"\n=== Fold {fold_idx} | Model: Autoencoder(M={args.M}, D={D}, k={args.k}) ===")
-    print(f"    Parameters: {n_params:,}")
+    print(f"    Parameters: {n_params:,}  |  AuxK={'disabled' if not use_auxk else f'{auxk} (coef={args.auxk_coef})'}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loader = DataLoader(
@@ -61,7 +111,15 @@ def train_fold(fold_idx, train_tensor, val_tensor, args, device):
         drop_last=False,
     )
 
+    steps_per_epoch = len(loader)
+    dead_threshold = args.dead_steps_threshold if args.dead_steps_threshold is not None \
+        else 2 * steps_per_epoch
+
     trajectory = []
+    global_step = 0
+    # steps_since_activated tracks how many steps each feature has gone without activating
+    steps_since_activated = torch.zeros(args.M, dtype=torch.long, device=device)
+
     for epoch in tqdm(range(1, args.num_epochs + 1), desc=f"Fold {fold_idx} epochs"):
         model.train()
         train_loss_sum = 0.0
@@ -69,21 +127,42 @@ def train_fold(fold_idx, train_tensor, val_tensor, args, device):
         for (batch,) in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            _, _, recons = model(batch)
-            loss = ((recons - batch) ** 2).mean()
+
+            latents_pre_act, latents, recons = model(batch)
+
+            main_loss = ((recons - batch) ** 2).mean()
+
+            if use_auxk:
+                dead_mask = steps_since_activated >= dead_threshold   # (M,)
+                aux = auxk_loss(model, batch, recons, dead_mask, auxk)
+                loss = main_loss + args.auxk_coef * aux
+            else:
+                loss = main_loss
+
             loss.backward()
             optimizer.step()
+
             # renormalize decoder columns
             model.decoder.weight.data /= (
                 model.decoder.weight.data.norm(dim=0, keepdim=True).clamp(min=1e-8)
             )
-            train_loss_sum += loss.item() * len(batch)
+
+            # update dead-feature tracker
+            activated = (latents > 0).any(dim=0)   # (M,) bool
+            steps_since_activated[activated] = 0
+            steps_since_activated[~activated] += 1
+
+            train_loss_sum += main_loss.item() * len(batch)
             train_n += len(batch)
+            global_step += 1
 
         train_mse = train_loss_sum / train_n
         v_mse = val_mse(model, val_tensor, args.batch_size, device)
-        print(f"  epoch={epoch:4d}  train_mse={train_mse:.6f}  val_mse={v_mse:.6f}")
-        trajectory.append({"epoch": epoch, "train_mse": train_mse, "val_mse": v_mse})
+        n_dead = (steps_since_activated >= dead_threshold).sum().item()
+        print(f"  epoch={epoch:4d}  train_mse={train_mse:.6f}  val_mse={v_mse:.6f}"
+              f"  dead={n_dead}/{args.M}")
+        trajectory.append({"epoch": epoch, "train_mse": train_mse, "val_mse": v_mse,
+                           "n_dead": n_dead})
 
     return model, trajectory
 
@@ -128,7 +207,7 @@ def main():
         # Save loss trajectory
         csv_path = os.path.join(args.output_dir, f"fold{fold_i}_losses.csv")
         with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["epoch", "train_mse", "val_mse"])
+            writer = csv.DictWriter(f, fieldnames=["epoch", "train_mse", "val_mse", "n_dead"])
             writer.writeheader()
             writer.writerows(trajectory)
         print(f"  -> Saved losses to {csv_path}")
