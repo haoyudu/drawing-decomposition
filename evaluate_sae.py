@@ -77,23 +77,24 @@ def check_reconstruction(X, recons):
     return r2, cos.mean()
 
 
-def check_pca_baseline(X, recons, M):
-    section("2. PCA baseline (optimal linear reconstruction)")
+def check_pca_baseline(X, recons, k):
+    section("2. PCA baseline (optimal linear reconstruction at k components)")
 
-    # Use min(M, N, D) components
-    n_comp = min(M, X.shape[0], X.shape[1])
-    pca = PCA(n_components=n_comp)
-    X_pca = pca.inverse_transform(pca.fit_transform(X))
-
-    mse_pca  = ((X - X_pca) ** 2).mean()
+    # Compare at same budget as SAE: k components (same as TopK sparsity)
+    # PCA with n_components=D would be perfect reconstruction (useless baseline)
     mse_mean = ((X - X.mean(axis=0, keepdims=True)) ** 2).mean()
-    r2_pca   = 1.0 - mse_pca / mse_mean
     mse_sae  = ((X - recons) ** 2).mean()
 
-    print(f"  PCA R²  ({n_comp} components): {r2_pca:.4f}")
-    print(f"  SAE MSE vs PCA MSE ratio:   {mse_sae / mse_pca:.3f}"
-          f"  (1.0 = matches PCA; <2 is fine given sparsity constraint)")
-    return r2_pca
+    for n_comp in [k, k * 2, k * 4]:
+        pca = PCA(n_components=n_comp)
+        X_pca = pca.inverse_transform(pca.fit_transform(X))
+        mse_pca = ((X - X_pca) ** 2).mean()
+        r2_pca  = 1.0 - mse_pca / mse_mean
+        ratio   = mse_sae / mse_pca
+        print(f"  PCA({n_comp:4d} components):  R²={r2_pca:.4f}  SAE/PCA MSE ratio={ratio:.3f}"
+              f"  {'✓' if ratio < 5 else '△' if ratio < 20 else '✗'}")
+
+    print("  (ratio ~1 = SAE matches PCA quality at that budget; <5 is acceptable)")
 
 
 def check_feature_usage(Z, M):
@@ -137,8 +138,9 @@ def check_semantic_preservation(X, Z, labels):
     )
 
     def probe(feats_tr, feats_te, name):
-        clf = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs",
-                                 multi_class="multinomial", n_jobs=-1)
+        print(f"  Fitting probe on {name} ...", flush=True)
+        clf = LogisticRegression(max_iter=300, C=1.0, solver="saga",
+                                 n_jobs=-1, verbose=0)
         clf.fit(feats_tr, y_tr)
         acc = accuracy_score(y_te, clf.predict(feats_te))
         print(f"  {name:30s}  accuracy={acc:.3f}  ({n_classes} classes)")
@@ -215,7 +217,7 @@ def main():
 
     # Run checks
     r2, cos_mean       = check_reconstruction(X_np, recons)
-    r2_pca             = check_pca_baseline(X_np, recons, args.M)
+    r2_pca             = check_pca_baseline(X_np, recons, args.k)
     act_freq           = check_feature_usage(Z, args.M)
     acc_x, acc_z       = check_semantic_preservation(X_np, Z, labels)
     top_features_summary(Z, act_freq)
