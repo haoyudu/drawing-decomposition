@@ -2,8 +2,8 @@
 Category × Feature heatmap for SAE activations.
 
 For each (category, feature) pair, computes the mean activation across drawings
-in that category. Selects the most category-selective features and plots a
-clustered heatmap.
+in that category. Selects the most category-selective features and plots a heatmap
+with rows/columns ordered so high values fall along the diagonal.
 
 Usage:
   python heatmap_features.py \
@@ -12,7 +12,11 @@ Usage:
       --model_path      outputs/fold0_sae.pt \
       --fold 0 \
       --n_features 50 \
+      --zscore \
       --output_path outputs/category_feature_heatmap.png
+
+  # Also save top drawings per category-feature pair:
+  python heatmap_features.py ... --save_top_images --top_k 10
 """
 
 import argparse
@@ -24,6 +28,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 import seaborn as sns
 from sklearn.model_selection import KFold
 
@@ -55,6 +60,89 @@ def encode_all(model, X_tensor, batch_size, device):
     return np.vstack(Zs)
 
 
+def diagonal_order(mat):
+    """
+    Reorder rows and columns of mat so high values fall near the diagonal.
+
+    Strategy:
+      1. Sort columns by which row has the highest value (argmax over rows).
+      2. After sorting columns, sort rows by which column position their peak falls at.
+    Returns (row_order, col_order) as index arrays.
+    """
+    col_peak_row = mat.argmax(axis=0)          # for each col, which row peaks it
+    col_order = np.argsort(col_peak_row)       # sort cols by their peak row
+
+    mat_cols_sorted = mat[:, col_order]
+    row_peak_col = mat_cols_sorted.argmax(axis=1)  # for each row, which col position it peaks at
+    row_order = np.argsort(row_peak_col)
+
+    return row_order, col_order
+
+
+def save_top_images_per_feature(
+    feature_global_indices, primary_cat_per_feature, cat_labels,
+    Z, meta_use, categories, top_k, out_dir,
+):
+    """
+    For each selected feature, show the top-k drawings from the feature's
+    primary category (the category with highest mean activation for that feature).
+    Saves one PNG per feature to out_dir/.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    n_cols = min(top_k, 5)
+    n_rows = (top_k + n_cols - 1) // n_cols
+
+    for feat_local, (feat_global, primary_cat_idx) in enumerate(
+        zip(feature_global_indices, primary_cat_per_feature)
+    ):
+        cat_name = cat_labels[primary_cat_idx]
+        cat_mask = categories == cat_name
+        cat_indices = np.where(cat_mask)[0]
+
+        if len(cat_indices) == 0:
+            continue
+
+        activations = Z[cat_indices, feat_global]
+        ranked = np.argsort(activations)[::-1][:top_k]
+        top_data_indices = cat_indices[ranked]
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.5, n_rows * 2.8))
+        axes = np.array(axes).reshape(-1)
+        for ax in axes:
+            ax.axis("off")
+
+        for plot_i, data_i in enumerate(top_data_indices):
+            row = meta_use.iloc[data_i]
+            img_path = row["filename"]
+            act_val = activations[ranked[plot_i]]
+            ax = axes[plot_i]
+            if os.path.exists(img_path):
+                try:
+                    img = mpimg.imread(img_path)
+                    ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
+                except Exception:
+                    ax.text(0.5, 0.5, "load error", ha="center", va="center",
+                            transform=ax.transAxes, fontsize=7)
+            else:
+                ax.text(0.5, 0.5, "missing", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=7)
+            age = str(row.get("age", ""))
+            ax.set_title(f"{age}  act={act_val:.3f}", fontsize=7, pad=2)
+            ax.axis("off")
+
+        n_active = (Z[cat_indices, feat_global] > 0).sum()
+        fig.suptitle(
+            f"Feature {feat_global}  |  Primary category: {cat_name}"
+            f"  |  active in {n_active}/{len(cat_indices)} {cat_name} drawings",
+            fontsize=9, y=1.01,
+        )
+        plt.tight_layout()
+        out_path = os.path.join(out_dir, f"feature_{feat_global:04d}_{cat_name}.png")
+        plt.savefig(out_path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--embeddings_path", required=True)
@@ -67,7 +155,7 @@ def main():
     parser.add_argument("--M",          type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--n_features", type=int, default=50,
-                        help="Number of selective features to show")
+                        help="Number of most category-selective features to show")
     parser.add_argument("--category_col", default="category")
     parser.add_argument("--freq_min",   type=float, default=0.005,
                         help="Min activation frequency to consider a feature alive")
@@ -75,10 +163,17 @@ def main():
     parser.add_argument("--use_all_data", action="store_true",
                         help="Encode all N drawings instead of only the val fold")
     parser.add_argument("--zscore", action="store_true",
-                        help="Z-score each feature column so color scale is comparable across features")
+                        help="Z-score each feature column so scale is comparable across features")
+    parser.add_argument("--save_top_images", action="store_true",
+                        help="Save a PNG per feature showing top drawings from its primary category")
+    parser.add_argument("--top_k", type=int, default=10,
+                        help="Number of top drawings per feature (used with --save_top_images)")
+    parser.add_argument("--top_images_dir", default=None,
+                        help="Output dir for top-image PNGs (default: <output_path stem>_top_images/)")
     args = parser.parse_args()
 
-    os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
+    out_dir = os.path.dirname(args.output_path) or "."
+    os.makedirs(out_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load data
@@ -111,35 +206,43 @@ def main():
     Z = encode_all(model, X_use, args.batch_size, device)
     print(f"Z shape: {Z.shape}")
 
-    # Drop dead features (never activate)
+    # Drop dead features
     act_freq = (Z > 0).mean(axis=0)
     alive = act_freq >= args.freq_min
     print(f"Alive features (freq >= {args.freq_min}): {alive.sum()}")
 
-    # Build category × feature mean-activation matrix
+    # Build category × feature mean-activation matrix (over alive features only)
     categories = meta_use[args.category_col].values
     cat_labels = sorted(np.unique(categories))
     n_cats = len(cat_labels)
 
-    # Only compute over alive features to save memory
-    Z_alive = Z[:, alive]           # (N_use, n_alive)
-    alive_idx = np.where(alive)[0]  # original feature indices
+    Z_alive = Z[:, alive]
+    alive_idx = np.where(alive)[0]
 
     cat_means = np.zeros((n_cats, Z_alive.shape[1]), dtype=np.float32)
     for ci, cat in enumerate(cat_labels):
         mask = categories == cat
         cat_means[ci] = Z_alive[mask].mean(axis=0)
 
-    # Select most category-selective features:
-    # selectivity = std across categories / (mean across categories + eps)
-    # High value = feature is much stronger for some categories than others
+    # Select most category-selective features
+    # selectivity = std across categories / (mean + eps): high = fires much more for some cats
     selectivity = cat_means.std(axis=0) / (cat_means.mean(axis=0) + 1e-8)
     top_local = np.argsort(selectivity)[::-1][:args.n_features]
-    top_global = alive_idx[top_local]  # original feature indices
+    top_global = alive_idx[top_local]
 
-    heatmap_data = cat_means[:, top_local]  # (n_cats, n_features)
-    col_labels = [f"f{i}" for i in top_global]
+    heatmap_data = cat_means[:, top_local]   # (n_cats, n_features)
 
+    # Diagonal ordering (on raw activations, before optional z-score)
+    row_order, col_order = diagonal_order(heatmap_data)
+    heatmap_data = heatmap_data[row_order, :][:, col_order]
+    cat_labels_ordered = [cat_labels[i] for i in row_order]
+    top_global_ordered = top_global[col_order]
+    col_labels = [f"f{i}" for i in top_global_ordered]
+
+    # Primary category per feature (after reordering, for save_top_images)
+    primary_cat_per_feature = row_order[heatmap_data.argmax(axis=0)]
+
+    # Optional z-score (after reordering so it doesn't affect ordering)
     if args.zscore:
         col_mean = heatmap_data.mean(axis=0, keepdims=True)
         col_std  = heatmap_data.std(axis=0, keepdims=True) + 1e-8
@@ -147,35 +250,50 @@ def main():
     else:
         plot_data = heatmap_data
 
-    df = pd.DataFrame(plot_data, index=cat_labels, columns=col_labels)
+    df = pd.DataFrame(plot_data, index=cat_labels_ordered, columns=col_labels)
 
-    # Clustered heatmap
-    figsize = (max(12, args.n_features * 0.25), max(8, n_cats * 0.25))
-    g = sns.clustermap(
-        df,
-        figsize=figsize,
+    # Heatmap (no dendrogram)
+    cell_w, cell_h = 0.28, 0.28
+    figsize = (max(10, args.n_features * cell_w + 2), max(6, n_cats * cell_h + 2))
+    fig, ax = plt.subplots(figsize=figsize)
+
+    sns.heatmap(
+        df, ax=ax,
         cmap="RdBu_r",
         center=0,
         xticklabels=True,
         yticklabels=True,
-        dendrogram_ratio=(0.1, 0.1),
-        cbar_pos=(0.02, 0.8, 0.03, 0.15),
+        cbar_kws={"shrink": 0.5, "label": "mean activation (z-scored)" if args.zscore else "mean activation"},
+        linewidths=0,
     )
-    g.ax_heatmap.set_xlabel("SAE feature (by index)", fontsize=10)
-    g.ax_heatmap.set_ylabel("Drawing category", fontsize=10)
-    g.ax_heatmap.tick_params(axis="x", labelsize=6, rotation=90)
-    g.ax_heatmap.tick_params(axis="y", labelsize=7)
+    ax.set_xlabel("SAE feature (by index)", fontsize=10)
+    ax.set_ylabel("Drawing category", fontsize=10)
+    ax.tick_params(axis="x", labelsize=6, rotation=90)
+    ax.tick_params(axis="y", labelsize=7, rotation=0)
+
     zscore_note = " (z-scored)" if args.zscore else ""
-    g.figure.suptitle(
+    ax.set_title(
         f"Category × Feature mean activation{zscore_note}\n"
         f"Top {args.n_features} most category-selective features  |  {n_cats} categories",
-        y=1.01, fontsize=11,
+        fontsize=11, pad=10,
     )
 
-    g.savefig(args.output_path, dpi=120, bbox_inches="tight")
-    plt.close()
+    plt.tight_layout()
+    plt.savefig(args.output_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
     print(f"Saved heatmap to {args.output_path}")
-    print(f"Top selective feature indices: {top_global[:10].tolist()} ...")
+    print(f"Top selective feature indices (ordered): {top_global_ordered[:10].tolist()} ...")
+
+    # Optionally save top images per feature
+    if args.save_top_images:
+        img_out_dir = args.top_images_dir or (
+            os.path.splitext(args.output_path)[0] + "_top_images"
+        )
+        print(f"\nSaving top-{args.top_k} images per feature to {img_out_dir}/")
+        save_top_images_per_feature(
+            top_global_ordered, primary_cat_per_feature, cat_labels,
+            Z, meta_use, categories, args.top_k, img_out_dir,
+        )
 
 
 if __name__ == "__main__":
