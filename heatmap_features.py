@@ -243,11 +243,12 @@ def main():
     else:
         plot_data = heatmap_data
 
-    df = pd.DataFrame(plot_data, index=cat_labels_ordered, columns=col_labels)
+    # Transpose: categories on x-axis, features on y-axis → wide figure
+    df = pd.DataFrame(plot_data.T, index=col_labels, columns=cat_labels_ordered)
 
-    # Heatmap (no dendrogram)
-    cell_w, cell_h = 0.28, 0.28
-    figsize = (max(10, args.n_features * cell_w + 2), max(6, n_cats * cell_h + 2))
+    # Heatmap (no dendrogram) — wider than tall
+    cell_w, cell_h = 0.30, 0.22
+    figsize = (max(12, n_cats * cell_w + 2), max(6, args.n_features * cell_h + 1))
     fig, ax = plt.subplots(figsize=figsize)
 
     sns.heatmap(
@@ -256,13 +257,21 @@ def main():
         center=0,
         xticklabels=True,
         yticklabels=True,
-        cbar_kws={"shrink": 0.5, "label": "mean activation (z-scored)" if args.zscore else "mean activation"},
+        cbar_kws={
+            "shrink": 0.35,
+            "aspect": 25,
+            "pad": 0.01,
+            "label": "mean activation (z-scored)" if args.zscore else "mean activation",
+        },
         linewidths=0,
     )
-    ax.set_xlabel("SAE feature (by index)", fontsize=10)
-    ax.set_ylabel("Drawing category", fontsize=10)
-    ax.tick_params(axis="x", labelsize=6, rotation=90)
-    ax.tick_params(axis="y", labelsize=7, rotation=0)
+    ax.set_ylabel("SAE feature", fontsize=10)
+    ax.set_xlabel("Drawing category", fontsize=10)
+    ax.tick_params(axis="x", labelsize=9, rotation=45)
+    ax.tick_params(axis="y", labelsize=6, rotation=0)
+    for label in ax.get_xticklabels():
+        label.set_fontweight("bold")
+        label.set_ha("right")
 
     zscore_note = " (z-scored)" if args.zscore else ""
     ax.set_title(
