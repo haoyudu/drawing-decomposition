@@ -79,62 +79,55 @@ def diagonal_order(mat):
     return row_order, col_order
 
 
-def save_top_images_per_feature(
+def save_collage(
     feature_global_indices, primary_cat_per_feature, cat_labels,
     Z, meta_use, categories, top_k, out_dir,
 ):
     """
-    For each selected feature, show the top-k drawings from the feature's
-    primary category (the category with highest mean activation for that feature).
-    Saves one PNG per feature to out_dir/.
+    Save one collage PNG per feature: a 1-row grid of top_k drawings from
+    the feature's primary category. Files saved to out_dir/.
     """
     os.makedirs(out_dir, exist_ok=True)
-    n_cols = min(top_k, 5)
-    n_rows = (top_k + n_cols - 1) // n_cols
+    cell = 1.8  # inches per image cell
 
-    for feat_local, (feat_global, primary_cat_idx) in enumerate(
-        zip(feature_global_indices, primary_cat_per_feature)
-    ):
+    for feat_global, primary_cat_idx in zip(feature_global_indices, primary_cat_per_feature):
         cat_name = cat_labels[primary_cat_idx]
         cat_mask = categories == cat_name
         cat_indices = np.where(cat_mask)[0]
 
-        if len(cat_indices) == 0:
-            continue
-
-        activations = Z[cat_indices, feat_global]
-        ranked = np.argsort(activations)[::-1][:top_k]
-        top_data_indices = cat_indices[ranked]
-
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.5, n_rows * 2.8))
+        fig, axes = plt.subplots(1, top_k, figsize=(top_k * cell, cell * 1.4))
         axes = np.array(axes).reshape(-1)
         for ax in axes:
             ax.axis("off")
 
-        for plot_i, data_i in enumerate(top_data_indices):
-            row = meta_use.iloc[data_i]
-            img_path = row["filename"]
-            act_val = activations[ranked[plot_i]]
-            ax = axes[plot_i]
-            if os.path.exists(img_path):
-                try:
-                    img = mpimg.imread(img_path)
-                    ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
-                except Exception:
-                    ax.text(0.5, 0.5, "load error", ha="center", va="center",
-                            transform=ax.transAxes, fontsize=7)
-            else:
-                ax.text(0.5, 0.5, "missing", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=7)
-            age = str(row.get("age", ""))
-            ax.set_title(f"{age}  act={act_val:.3f}", fontsize=7, pad=2)
-            ax.axis("off")
+        if len(cat_indices) > 0:
+            activations = Z[cat_indices, feat_global]
+            ranked = np.argsort(activations)[::-1][:top_k]
+            top_data_indices = cat_indices[ranked]
 
-        n_active = (Z[cat_indices, feat_global] > 0).sum()
+            for ki, data_i in enumerate(top_data_indices):
+                row = meta_use.iloc[data_i]
+                img_path = row["filename"]
+                act_val = activations[ranked[ki]]
+                ax = axes[ki]
+                if os.path.exists(img_path):
+                    try:
+                        img = mpimg.imread(img_path)
+                        ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
+                    except Exception:
+                        ax.text(0.5, 0.5, "err", ha="center", va="center",
+                                transform=ax.transAxes, fontsize=7)
+                else:
+                    ax.text(0.5, 0.5, "?", ha="center", va="center",
+                            transform=ax.transAxes, fontsize=7)
+                age = str(row.get("age", ""))
+                ax.set_title(f"{age}  {act_val:.2f}", fontsize=7, pad=2)
+
+        n_active = (Z[cat_indices, feat_global] > 0).sum() if len(cat_indices) > 0 else 0
         fig.suptitle(
-            f"Feature {feat_global}  |  Primary category: {cat_name}"
-            f"  |  active in {n_active}/{len(cat_indices)} {cat_name} drawings",
-            fontsize=9, y=1.01,
+            f"Feature {feat_global}  |  {cat_name}  |  "
+            f"active in {n_active}/{len(cat_indices)} drawings",
+            fontsize=9,
         )
         plt.tight_layout()
         out_path = os.path.join(out_dir, f"feature_{feat_global:04d}_{cat_name}.png")
@@ -284,15 +277,15 @@ def main():
     print(f"Saved heatmap to {args.output_path}")
     print(f"Top selective feature indices (ordered): {top_global_ordered[:10].tolist()} ...")
 
-    # Optionally save top images per feature
+    # Optionally save per-feature collages
     if args.save_top_images:
-        img_out_dir = args.top_images_dir or (
-            os.path.splitext(args.output_path)[0] + "_top_images"
+        collage_dir = args.top_images_dir or (
+            os.path.splitext(args.output_path)[0] + "_collages"
         )
-        print(f"\nSaving top-{args.top_k} images per feature to {img_out_dir}/")
-        save_top_images_per_feature(
+        print(f"\nSaving top-{args.top_k} collages per feature to {collage_dir}/")
+        save_collage(
             top_global_ordered, primary_cat_per_feature, cat_labels,
-            Z, meta_use, categories, args.top_k, img_out_dir,
+            Z, meta_use, categories, args.top_k, collage_dir,
         )
 
 
