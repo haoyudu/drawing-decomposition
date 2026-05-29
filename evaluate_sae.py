@@ -179,6 +179,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--category_col", default="category",
                         help="Column in metadata parquet with drawing category labels")
+    parser.add_argument("--skip_probe", action="store_true",
+                        help="Skip the slow logistic regression probe (checks 1-3 still run)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -216,17 +218,21 @@ def main():
     Z, recons = get_codes_and_recons(model, X_tensor, args.batch_size, device)
 
     # Run checks
-    r2, cos_mean       = check_reconstruction(X_np, recons)
-    r2_pca             = check_pca_baseline(X_np, recons, args.k)
-    act_freq           = check_feature_usage(Z, args.M)
-    acc_x, acc_z       = check_semantic_preservation(X_np, Z, labels)
+    r2, cos_mean = check_reconstruction(X_np, recons)
+    r2_pca       = check_pca_baseline(X_np, recons, args.k)
+    act_freq     = check_feature_usage(Z, args.M)
+    if not args.skip_probe:
+        acc_x, acc_z = check_semantic_preservation(X_np, Z, labels)
     top_features_summary(Z, act_freq)
 
     # Summary verdict
     section("Summary")
-    ok = (r2 > 0.7) and (cos_mean > 0.85) and (acc_z / max(acc_x, 1e-9) > 0.8)
-    print(f"  R²={r2:.3f}  cosine={cos_mean:.3f}  "
-          f"probe_ratio={acc_z/max(acc_x,1e-9):.3f}")
+    if args.skip_probe:
+        ok = (r2 > 0.7) and (cos_mean > 0.85)
+        print(f"  R²={r2:.3f}  cosine={cos_mean:.3f}  (probe skipped)")
+    else:
+        ok = (r2 > 0.7) and (cos_mean > 0.85) and (acc_z / max(acc_x, 1e-9) > 0.8)
+        print(f"  R²={r2:.3f}  cosine={cos_mean:.3f}  probe_ratio={acc_z/max(acc_x,1e-9):.3f}")
     print(f"  Overall: {'✓ SAE looks healthy — proceed to full analysis' if ok else '✗ Address issues above before downstream analysis'}")
 
 
