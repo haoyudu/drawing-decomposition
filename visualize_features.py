@@ -121,9 +121,13 @@ def main():
     parser.add_argument("--M",        type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--features", type=int, nargs="*", default=None,
-                        help="Feature indices to visualize. If omitted, uses top --n_auto most active.")
+                        help="Feature indices to visualize. If omitted, uses --n_auto features.")
     parser.add_argument("--n_auto",   type=int, default=10,
-                        help="Number of most-active features to visualize when --features is not set")
+                        help="Number of features to visualize when --features is not set")
+    parser.add_argument("--freq_min", type=float, default=0.01,
+                        help="Min activation frequency for auto-selection (default 0.01 = 1%% of val drawings)")
+    parser.add_argument("--freq_max", type=float, default=0.10,
+                        help="Max activation frequency for auto-selection (default 0.10 = 10%% of val drawings)")
     parser.add_argument("--top_k",    type=int, default=20,
                         help="Number of top-activating drawings to show per feature")
     parser.add_argument("--output_dir", default="outputs/feature_viz")
@@ -164,8 +168,17 @@ def main():
         feature_list = args.features
     else:
         act_freq = (Z_val > 0).mean(axis=0)
-        feature_list = np.argsort(act_freq)[::-1][:args.n_auto].tolist()
-        print(f"Auto-selected top {args.n_auto} most active features: {feature_list}")
+        # Select from the selective range (freq_min to freq_max) — these are the
+        # interpretable ones. Rank by frequency descending within that window.
+        in_range = np.where((act_freq >= args.freq_min) & (act_freq <= args.freq_max))[0]
+        if len(in_range) == 0:
+            print(f"WARNING: no features found with freq in [{args.freq_min}, {args.freq_max}]. "
+                  f"Falling back to top {args.n_auto} most active.")
+            in_range = np.argsort(act_freq)[::-1][:args.n_auto]
+        ranked_in_range = in_range[np.argsort(act_freq[in_range])[::-1]]
+        feature_list = ranked_in_range[:args.n_auto].tolist()
+        print(f"Auto-selected {len(feature_list)} features with freq in "
+              f"[{args.freq_min}, {args.freq_max}] ({len(in_range)} total in range): {feature_list}")
 
     print(f"\nVisualizing {len(feature_list)} features, top {args.top_k} drawings each...")
     for f in feature_list:
