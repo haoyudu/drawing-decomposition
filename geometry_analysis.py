@@ -315,8 +315,12 @@ def main():
         activation=TopK(k=args.k), tied=False, normalize=True,
     ).to(device)
     sd = torch.load(args.model_path, map_location=device)
+    # state_dict() is overridden in model.py to add non-tensor "activation" and
+    # "activation_state_dict" entries; filter to tensors before loading
     sd_clean = {k: v for k, v in sd.items() if isinstance(v, torch.Tensor)}
-    model.load_state_dict(sd_clean, strict=False)
+    missing, unexpected = model.load_state_dict(sd_clean, strict=False)
+    assert not missing, f"missing keys in checkpoint: {missing}"
+    assert not unexpected, f"unexpected keys in checkpoint: {unexpected}"
     print(f"loaded: {args.model_path}")
     Z = encode_all(model, torch.from_numpy(X_val), args.batch_size, device)
     print(f"sae codes: {Z.shape}")
