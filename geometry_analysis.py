@@ -74,7 +74,7 @@ def section(title):
     print('='*60)
 
 
-# ── analysis 1: scree / compressibility ────────────────────────────────────────
+# analysis 1: scree / compressibility
 
 def pca_scree(X):
     """fit full pca on X; return cumulative explained variance and threshold counts."""
@@ -103,7 +103,7 @@ def pca_scree(X):
     return cev, thresholds, knee_n
 
 
-# ── build reduced representations ──────────────────────────────────────────────
+# build reduced representations
 
 def build_representations(X, n_components, seed):
     """
@@ -119,18 +119,20 @@ def build_representations(X, n_components, seed):
     pca = PCA(n_components=n_components, random_state=seed)
     reps["PCA"] = pca.fit_transform(X)
 
-    # ica
+    # ica on pca-reduced data: avoids fastica's expensive internal full svd
+    from sklearn.decomposition import PCA
     scaler_ica = StandardScaler()
     X_ica = scaler_ica.fit_transform(X)
+    X_ica_pca = PCA(n_components=n_components, random_state=seed).fit_transform(X_ica)
     ica = FastICA(n_components=n_components, random_state=seed,
-                  max_iter=1000, whiten="unit-variance")
-    reps["ICA"] = ica.fit_transform(X_ica)
+                  max_iter=200, whiten=False)
+    reps["ICA"] = ica.fit_transform(X_ica_pca)
 
     # nmf
     scaler_nmf = MinMaxScaler()
     X_nmf = np.clip(scaler_nmf.fit_transform(X), 0, None)
     nmf = NMF(n_components=n_components, init="nndsvda",
-              random_state=seed, max_iter=2000,
+              random_state=seed, max_iter=300,
               solver="cd", beta_loss="frobenius")
     reps["NMF"] = nmf.fit_transform(X_nmf)
 
