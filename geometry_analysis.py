@@ -120,7 +120,6 @@ def build_representations(X, n_components, seed):
     reps["PCA"] = pca.fit_transform(X)
 
     # ica on pca-reduced data: avoids fastica's expensive internal full svd
-    from sklearn.decomposition import PCA
     scaler_ica = StandardScaler()
     X_ica = scaler_ica.fit_transform(X)
     X_ica_pca = PCA(n_components=n_components, random_state=seed).fit_transform(X_ica)
@@ -132,14 +131,14 @@ def build_representations(X, n_components, seed):
     scaler_nmf = MinMaxScaler()
     X_nmf = np.clip(scaler_nmf.fit_transform(X), 0, None)
     nmf = NMF(n_components=n_components, init="nndsvda",
-              random_state=seed, max_iter=300,
+              random_state=seed, max_iter=2000,
               solver="cd", beta_loss="frobenius")
     reps["NMF"] = nmf.fit_transform(X_nmf)
 
     return reps
 
 
-# ── analysis 2: rdm correlation ────────────────────────────────────────────────
+# analysis 2: rdm correlation
 
 def cosine_rdm(R):
     """flattened upper triangle of pairwise cosine distance matrix."""
@@ -191,7 +190,7 @@ def between_category_rdm(X, R_dict, categories, cat_labels):
     return results
 
 
-# ── plotting ────────────────────────────────────────────────────────────────────
+# plotting
 
 def plot_results(cev, thresholds, knee_n, within_res, between_res,
                  methods, output_path):
