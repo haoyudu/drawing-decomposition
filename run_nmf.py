@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Run NMF on Kiddraw CLIP embeddings.
+Run NMF on Kiddraw CLIP embeddings (full dataset, no train/test split).
+
+NMF preprocessing matches geometry_analysis.build_representations:
+MinMaxScaler -> clip non-negative.
 
 Author: L. Kemmelmeier
 """
@@ -16,7 +19,6 @@ from PIL import Image
 
 from sklearn.decomposition import NMF
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 
 
 #%% paths and parameters
@@ -32,10 +34,9 @@ os.makedirs(out_dir, exist_ok=True)
 embeddings_file = os.path.join(data_dir, "kiddraw_clip_embeddings.npy")
 metadata_file = os.path.join(data_dir, "kiddraw_clip_metadata.parquet")
 
-n_components = 50
+n_components = 55
 random_state = 0
 max_iter = 2000
-test_size = 0.10
 n_top_images = 20
 
 
@@ -60,36 +61,12 @@ metadata["clean_image_path"] = metadata["clean_filename"].apply(
 print(f"Loaded {X.shape[0]} drawings with {X.shape[1]} CLIP features")
 
 
-#%% train/test split
-
-indices = np.arange(len(X))
-
-train_idx, test_idx = train_test_split(
-    indices,
-    test_size=test_size,
-    random_state=random_state,
-    shuffle=True
-)
-
-X_train = X[train_idx]
-X_test = X[test_idx]
-
-metadata_train = metadata.iloc[train_idx].reset_index(drop=True)
-metadata_test = metadata.iloc[test_idx].reset_index(drop=True)
-
-print(f"Train set: {X_train.shape[0]} drawings")
-print(f"Test set: {X_test.shape[0]} drawings")
-
-
 #%% scale data for NMF
 
 scaler = MinMaxScaler()
 
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
-X_train_scaled = np.clip(X_train_scaled, 0, None)
-X_test_scaled = np.clip(X_test_scaled, 0, None)
+X_scaled = scaler.fit_transform(X)
+X_scaled = np.clip(X_scaled, 0, None)
 
 
 #%% fit NMF
@@ -103,58 +80,35 @@ nmf = NMF(
     beta_loss="frobenius",
     alpha_W=0.0,
     alpha_H=0.0,
-    l1_ratio=0.0
+    l1_ratio=0.0,
 )
 
-W_train = nmf.fit_transform(X_train_scaled)
-W_test = nmf.transform(X_test_scaled)
+W = nmf.fit_transform(X_scaled)
 
 print(f"NMF reconstruction error: {nmf.reconstruction_err_:.4f}")
 
 
 #%% save NMF outputs
 
-np.save(os.path.join(out_dir, "W_train.npy"), W_train)
-np.save(os.path.join(out_dir, "W_test.npy"), W_test)
-
-np.save(os.path.join(out_dir, "train_indices.npy"), train_idx)
-np.save(os.path.join(out_dir, "test_indices.npy"), test_idx)
+np.save(os.path.join(out_dir, "W.npy"), W)
 
 np.save(os.path.join(out_dir, "nmf_components.npy"), nmf.components_)
 
-metadata_train.to_parquet(
-    os.path.join(out_dir, "metadata_train.parquet")
-)
-
-metadata_test.to_parquet(
-    os.path.join(out_dir, "metadata_test.parquet")
-)
+metadata.to_parquet(os.path.join(out_dir, "metadata.parquet"))
 
 
 #%% attach NMF scores to metadata
 
 nmf_col_names = [f"nmf_{i:03d}" for i in range(n_components)]
 
-W_train_df = pd.DataFrame(W_train, columns=nmf_col_names)
-W_test_df = pd.DataFrame(W_test, columns=nmf_col_names)
+W_df = pd.DataFrame(W, columns=nmf_col_names)
 
-metadata_train_nmf = pd.concat(
-    [metadata_train.reset_index(drop=True), W_train_df],
-    axis=1
+metadata_nmf = pd.concat(
+    [metadata.reset_index(drop=True), W_df],
+    axis=1,
 )
 
-metadata_test_nmf = pd.concat(
-    [metadata_test.reset_index(drop=True), W_test_df],
-    axis=1
-)
-
-metadata_train_nmf.to_parquet(
-    os.path.join(out_dir, "metadata_train_nmf.parquet")
-)
-
-metadata_test_nmf.to_parquet(
-    os.path.join(out_dir, "metadata_test_nmf.parquet")
-)
+metadata_nmf.to_parquet(os.path.join(out_dir, "metadata_nmf.parquet"))
 
 
 #%% save top image names for each NMF component
@@ -166,7 +120,7 @@ for component in range(n_components):
     component_col = f"nmf_{component:03d}"
 
     top_df = (
-        metadata_train_nmf
+        metadata_nmf
         .sort_values(component_col, ascending=False)
         .head(n_top_images)
     )
@@ -180,15 +134,16 @@ for component in range(n_components):
             "filename": row["clean_filename"],
             "image_path": row["clean_image_path"],
             "category": row["category"],
-            "age_numeric": row["age_numeric"]
+            "age_numeric": row["age_numeric"],
         })
 
 component_top_df = pd.DataFrame(component_top_rows)
 
 component_top_df.to_csv(
     os.path.join(out_dir, "nmf_component_top_filenames.csv"),
-    index=False
+    index=False,
 )
+
 
 #%% plot top images for each NMF component
 
@@ -216,7 +171,7 @@ def plot_component_top_images(metadata_nmf, component, n_images=12):
     fig, axes = plt.subplots(
         1,
         n_images,
-        figsize=(n_images * 1.7, 3.2)
+        figsize=(n_images * 1.7, 3.2),
     )
 
     if n_images == 1:
@@ -230,7 +185,7 @@ def plot_component_top_images(metadata_nmf, component, n_images=12):
 
         axes[i].set_title(
             f"{row[component_col]:.2f}",
-            fontsize=8
+            fontsize=8,
         )
 
         axes[i].text(
@@ -240,19 +195,19 @@ def plot_component_top_images(metadata_nmf, component, n_images=12):
             ha="center",
             va="top",
             transform=axes[i].transAxes,
-            fontsize=8
+            fontsize=8,
         )
 
     fig.suptitle(
         f"NMF Component {component}",
-        fontsize=14
+        fontsize=14,
     )
 
     plt.tight_layout(rect=[0, 0.06, 1, 0.90])
 
     save_path = os.path.join(
         component_plot_dir,
-        f"nmf_component_{component:03d}_top_images.png"
+        f"nmf_component_{component:03d}_top_images.png",
     )
 
     plt.savefig(save_path, dpi=300, facecolor="white")
@@ -261,22 +216,22 @@ def plot_component_top_images(metadata_nmf, component, n_images=12):
 
 for component in range(n_components):
     plot_component_top_images(
-        metadata_nmf=metadata_train_nmf,
+        metadata_nmf=metadata_nmf,
         component=component,
-        n_images=12
+        n_images=12,
     )
 
 
 #%% category-component means
 
 category_component_means = (
-    metadata_test_nmf
+    metadata_nmf
     .groupby("category")[nmf_col_names]
     .mean()
 )
 
 category_component_means.to_csv(
-    os.path.join(out_dir, "test_category_component_mean_scores.csv")
+    os.path.join(out_dir, "category_component_mean_scores.csv"),
 )
 
 
@@ -331,7 +286,7 @@ def plot_category_component_heatmap(
     save_path,
     colorbar_label,
     vmin=None,
-    vmax=None
+    vmax=None,
 ):
 
     fig, ax = plt.subplots(figsize=(22, 18))
@@ -341,14 +296,14 @@ def plot_category_component_heatmap(
         aspect="auto",
         interpolation="nearest",
         vmin=vmin,
-        vmax=vmax
+        vmax=vmax,
     )
 
     ax.set_yticks(np.arange(len(heatmap_df.index)))
     ax.set_yticklabels(
         heatmap_df.index,
         fontsize=18,
-        fontweight="bold"
+        fontweight="bold",
     )
 
     ax.set_xticks(np.arange(len(heatmap_df.columns)))
@@ -356,21 +311,21 @@ def plot_category_component_heatmap(
         component_labels,
         rotation=90,
         fontsize=13,
-        fontweight="bold"
+        fontweight="bold",
     )
 
     ax.set_xlabel(
         "NMF Component",
         fontsize=24,
         fontweight="bold",
-        labelpad=15
+        labelpad=15,
     )
 
     ax.set_ylabel(
         "Category",
         fontsize=24,
         fontweight="bold",
-        labelpad=15
+        labelpad=15,
     )
 
     ax.tick_params(axis="x", length=4, labelsize=13)
@@ -383,14 +338,14 @@ def plot_category_component_heatmap(
         im,
         ax=ax,
         fraction=0.035,
-        pad=0.02
+        pad=0.02,
     )
 
     cbar.set_label(
         colorbar_label,
         fontsize=20,
         fontweight="bold",
-        labelpad=15
+        labelpad=15,
     )
 
     cbar.ax.tick_params(labelsize=16)
@@ -400,7 +355,7 @@ def plot_category_component_heatmap(
     plt.savefig(
         save_path,
         dpi=300,
-        bbox_inches="tight"
+        bbox_inches="tight",
     )
 
     plt.close()
@@ -410,14 +365,14 @@ def plot_category_component_heatmap(
 
 category_heatmap_dir = os.path.join(
     out_dir,
-    "test_category_component_heatmaps"
+    "category_component_heatmaps",
 )
 
 os.makedirs(category_heatmap_dir, exist_ok=True)
 
 raw_heatmap_df, raw_component_labels = order_category_component_matrix(
     category_component_means,
-    component_prefix="nmf_"
+    component_prefix="nmf_",
 )
 
 plot_category_component_heatmap(
@@ -425,9 +380,9 @@ plot_category_component_heatmap(
     component_labels=raw_component_labels,
     save_path=os.path.join(
         category_heatmap_dir,
-        "test_category_component_heatmap.png"
+        "category_component_heatmap.png",
     ),
-    colorbar_label="Mean NMF Score"
+    colorbar_label="Mean NMF Score",
 )
 
 
@@ -435,7 +390,7 @@ plot_category_component_heatmap(
 
 normalized_heatmap_dir = os.path.join(
     out_dir,
-    "test_category_component_heatmaps_normalized"
+    "category_component_heatmaps_normalized",
 )
 
 os.makedirs(normalized_heatmap_dir, exist_ok=True)
@@ -450,7 +405,7 @@ normalized_category_component_means = (
 
 normalized_heatmap_df, normalized_component_labels = order_category_component_matrix(
     normalized_category_component_means,
-    component_prefix="nmf_"
+    component_prefix="nmf_",
 )
 
 plot_category_component_heatmap(
@@ -458,17 +413,17 @@ plot_category_component_heatmap(
     component_labels=normalized_component_labels,
     save_path=os.path.join(
         normalized_heatmap_dir,
-        "test_category_component_heatmap_normalized.png"
+        "category_component_heatmap_normalized.png",
     ),
     colorbar_label="Normalized Component Score",
     vmin=0,
-    vmax=1
+    vmax=1,
 )
 
 
 #%% category selectivity table
 
-selectivity_dir = os.path.join(out_dir, "test_category_selectivity")
+selectivity_dir = os.path.join(out_dir, "category_selectivity")
 os.makedirs(selectivity_dir, exist_ok=True)
 
 selectivity_rows = []
@@ -486,7 +441,7 @@ for comp in nmf_col_names:
         "top_category": top_category,
         "top_score": top_score,
         "mean_other_score": mean_other_score,
-        "selectivity_score": top_score - mean_other_score
+        "selectivity_score": top_score - mean_other_score,
     })
 
 selectivity_df = (
@@ -497,15 +452,15 @@ selectivity_df = (
 selectivity_df.to_csv(
     os.path.join(
         selectivity_dir,
-        "test_nmf_component_category_selectivity.csv"
+        "nmf_component_category_selectivity.csv",
     ),
-    index=False
+    index=False,
 )
 
 
 #%% top categories for each component
 
-top_categories_dir = os.path.join(out_dir, "test_top_categories_per_component")
+top_categories_dir = os.path.join(out_dir, "top_categories_per_component")
 os.makedirs(top_categories_dir, exist_ok=True)
 
 top_category_rows = []
@@ -524,7 +479,7 @@ for comp in nmf_col_names:
             "component": comp,
             "rank": rank,
             "category": category,
-            "mean_score": score
+            "mean_score": score,
         })
 
 top_categories_df = pd.DataFrame(top_category_rows)
@@ -532,27 +487,27 @@ top_categories_df = pd.DataFrame(top_category_rows)
 top_categories_df.to_csv(
     os.path.join(
         top_categories_dir,
-        "test_top_categories_per_component.csv"
+        "top_categories_per_component.csv",
     ),
-    index=False
+    index=False,
 )
 
 
-#%% age trajectories for top age-related NMF components
+#%% age trajectories for components most correlated with age
 
-age_plot_dir = os.path.join(out_dir, "test_age_trajectories")
+age_plot_dir = os.path.join(out_dir, "age_trajectories")
 os.makedirs(age_plot_dir, exist_ok=True)
 
 age_component_corrs = []
 
 for comp in nmf_col_names:
 
-    r = metadata_test_nmf[[comp, "age_numeric"]].corr().iloc[0, 1]
+    r = metadata_nmf[[comp, "age_numeric"]].corr().iloc[0, 1]
 
     age_component_corrs.append({
         "component": comp,
         "age_corr": r,
-        "abs_age_corr": abs(r)
+        "abs_age_corr": abs(r),
     })
 
 age_component_corrs_df = (
@@ -561,8 +516,8 @@ age_component_corrs_df = (
 )
 
 age_component_corrs_df.to_csv(
-    os.path.join(out_dir, "test_age_component_correlations.csv"),
-    index=False
+    os.path.join(out_dir, "age_component_correlations.csv"),
+    index=False,
 )
 
 top_age_components = age_component_corrs_df["component"].head(10).tolist()
@@ -570,7 +525,7 @@ top_age_components = age_component_corrs_df["component"].head(10).tolist()
 for comp in top_age_components:
 
     age_summary = (
-        metadata_test_nmf
+        metadata_nmf
         .groupby("age_numeric")[comp]
         .agg(["mean", "sem", "count"])
         .reset_index()
@@ -584,19 +539,19 @@ for comp in top_age_components:
         yerr=age_summary["sem"],
         marker="o",
         linewidth=2,
-        capsize=3
+        capsize=3,
     )
 
     plt.axhline(0, linestyle="--", linewidth=1)
 
     plt.xlabel("Age")
     plt.ylabel("Mean NMF Score")
-    plt.title(f"Test Data Age Trajectory: {comp}")
+    plt.title(f"Age trajectory: {comp}")
     plt.tight_layout()
 
     save_path = os.path.join(
         age_plot_dir,
-        f"{comp}_age_trajectory_test.png"
+        f"{comp}_age_trajectory.png",
     )
 
     plt.savefig(save_path, dpi=300)
