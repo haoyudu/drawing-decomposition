@@ -244,7 +244,10 @@ def main():
         description="geometry analysis: compressibility + rdm correlation")
     parser.add_argument("--embeddings_path", required=True)
     parser.add_argument("--metadata_path",   required=True)
-    parser.add_argument("--model_path",      required=True)
+    parser.add_argument("--model_path",      default=None,
+                        help="path to trained sae checkpoint (required unless --skip_sae)")
+    parser.add_argument("--skip_sae",        action="store_true",
+                        help="skip sae encoding; run pca/ica/nmf only")
     parser.add_argument("--fold",         type=int, default=0)
     parser.add_argument("--n_folds",      type=int, default=5)
     parser.add_argument("--seed",         type=int, default=0)
@@ -263,6 +266,9 @@ def main():
     parser.add_argument("--output_path",  default=None,
                         help="output svg path (default: outputs/geometry_analysis_{model}.svg)")
     args = parser.parse_args()
+
+    if not args.skip_sae and args.model_path is None:
+        parser.error("--model_path is required unless --skip_sae is set")
 
     # derive model tag from embeddings filename: "kiddraw_clip_embeddings.npy" → "clip"
     basename = os.path.splitext(os.path.basename(args.embeddings_path))[0]
@@ -319,28 +325,30 @@ def main():
     n_components = args.n_components if args.n_components is not None else knee_n
     print(f"  → using n_components = {n_components} for pca / ica / nmf")
 
-    # sae encoding 
-    section("2. sae encoding (val fold)")
-    model = Autoencoder(
-        n_latents=args.M, n_inputs=D,
-        activation=TopK(k=args.k), tied=False, normalize=True,
-    ).to(device)
-    sd = torch.load(args.model_path, map_location=device)
-    # state_dict() is overridden in model.py to add non-tensor "activation" and
-    # "activation_state_dict" entries; filter to tensors before loading
-    sd_clean = {k: v for k, v in sd.items() if isinstance(v, torch.Tensor)}
-    missing, unexpected = model.load_state_dict(sd_clean, strict=False)
-    assert not missing, f"missing keys in checkpoint: {missing}"
-    assert not unexpected, f"unexpected keys in checkpoint: {unexpected}"
-    print(f"loaded: {args.model_path}")
-    Z = encode_all(model, torch.from_numpy(X_val), args.batch_size, device)
-    print(f"sae codes: {Z.shape}")
+    # sae encoding
+    if not args.skip_sae:
+        section("2. sae encoding (val fold)")
+        model = Autoencoder(
+            n_latents=args.M, n_inputs=D,
+            activation=TopK(k=args.k), tied=False, normalize=True,
+        ).to(device)
+        sd = torch.load(args.model_path, map_location=device)
+        # state_dict() is overridden in model.py to add non-tensor "activation" and
+        # "activation_state_dict" entries; filter to tensors before loading
+        sd_clean = {k: v for k, v in sd.items() if isinstance(v, torch.Tensor)}
+        missing, unexpected = model.load_state_dict(sd_clean, strict=False)
+        assert not missing, f"missing keys in checkpoint: {missing}"
+        assert not unexpected, f"unexpected keys in checkpoint: {unexpected}"
+        print(f"loaded: {args.model_path}")
+        Z = encode_all(model, torch.from_numpy(X_val), args.batch_size, device)
+        print(f"sae codes: {Z.shape}")
 
-    # fit classical reducers on val fold 
+    # fit classical reducers on val fold
     section("3. fitting pca / ica / nmf on val fold")
     reps = build_representations(X_val, n_components, args.seed)
-    reps["SAE"] = Z
-    methods = ["PCA", "ICA", "NMF", "SAE"]
+    if not args.skip_sae:
+        reps["SAE"] = Z
+    methods = ["PCA", "ICA", "NMF"] if args.skip_sae else ["PCA", "ICA", "NMF", "SAE"]
     for m in methods:
         print(f"  {m}: {reps[m].shape}")
 
