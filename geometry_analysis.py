@@ -115,19 +115,13 @@ def build_representations(X, n_components, seed):
       nmf      — MinMaxScaler then clip(0, inf) on raw X  [matches run_nmf.py]
     """
     reps = {}
-
-    # shared standardization for pca and ica
     X_std = StandardScaler().fit_transform(X)
-
-    # pca on standardized data
     pca = PCA(n_components=n_components, random_state=seed)
-    reps["PCA"] = pca.fit_transform(X_std)
-
-    # ica on pca-reduced standardized data
-    X_ica_pca = PCA(n_components=n_components, random_state=seed).fit_transform(X_std)
-    ica = FastICA(n_components=n_components, random_state=seed,
-                  max_iter=200, whiten=False)
-    reps["ICA"] = ica.fit_transform(X_ica_pca)
+    X_pca = pca.fit_transform(X_std)
+    reps["PCA"] = X_pca
+    # ica on the same pca-reduced data; whiten=False since pca already did it
+    ica = FastICA(random_state=seed, max_iter=200, whiten=False)
+    reps["ICA"] = ica.fit_transform(X_pca)
 
     # nmf: MinMaxScaler + clip on raw X, consistent with run_nmf.py
     X_nmf = np.clip(MinMaxScaler().fit_transform(X), 0, None)
