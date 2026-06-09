@@ -263,6 +263,9 @@ def main():
                         help="skip categories with fewer val drawings than this")
     parser.add_argument("--n_seeds",      type=int, default=5,
                         help="seeds for subsampled-category averaging")
+    parser.add_argument("--use_all_data", action="store_true",
+                        help="use all N drawings instead of val fold only; "
+                             "recommended with --skip_sae")
     parser.add_argument("--output_path",  default=None,
                         help="output svg path (default: outputs/geometry_analysis_{model}.svg)")
     args = parser.parse_args()
@@ -288,14 +291,19 @@ def main():
     meta = pd.read_parquet(args.metadata_path)
     assert len(meta) == N
 
-    # restrict to val fold — all four methods are fit and evaluated here only,
-    # so the sae (trained on complementary folds) is assessed out-of-sample
-    # alongside pca, ica, and nmf
-    val_idx  = get_val_indices(N, args.n_folds, args.fold, args.seed)
-    X_val    = X_np[val_idx]
-    meta_val = meta.iloc[val_idx].reset_index(drop=True)
+    if args.use_all_data:
+        if not args.skip_sae:
+            print("warning: --use_all_data with sae enabled; sae is no longer out-of-sample")
+        X_val    = X_np
+        meta_val = meta.reset_index(drop=True)
+        print(f"using all {N} drawings")
+    else:
+        # restrict to val fold so sae (trained on complementary folds) is out-of-sample
+        val_idx  = get_val_indices(N, args.n_folds, args.fold, args.seed)
+        X_val    = X_np[val_idx]
+        meta_val = meta.iloc[val_idx].reset_index(drop=True)
+        print(f"val fold {args.fold}: {len(val_idx)} drawings")
     categories = meta_val[args.category_col].values
-    print(f"val fold {args.fold}: {len(val_idx)} drawings")
 
     # per-category n report and min-n filtering
     all_cats = sorted(np.unique(categories))
