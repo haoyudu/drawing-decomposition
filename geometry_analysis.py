@@ -41,7 +41,7 @@ from scipy.stats import spearmanr
 from model import Autoencoder, TopK
 
 
-# ── fold helpers (matches visualize_features.py / heatmap_features.py) ─────────
+# fold helpers (matches visualize_features.py / heatmap_features.py)
 
 def get_val_indices(N, n_folds, fold, seed):
     indices = np.arange(N)
@@ -109,27 +109,28 @@ def build_representations(X, n_components, seed):
     """
     fit pca, ica, nmf on X and return dict of reduced arrays (same row order as X).
 
-    preprocessing follows existing scripts:
-      ica — StandardScaler then FastICA(whiten="unit-variance")  [run_ica.py]
-      nmf — MinMaxScaler then clip(0, inf)                       [run_nmf.py]
+    preprocessing:
+      pca, ica — StandardScaler applied once to X; ica additionally reduces via
+                 pca before FastICA(whiten=False) to avoid expensive internal svd
+      nmf      — MinMaxScaler then clip(0, inf) on raw X  [matches run_nmf.py]
     """
     reps = {}
 
-    # pca
-    pca = PCA(n_components=n_components, random_state=seed)
-    reps["PCA"] = pca.fit_transform(X)
+    # shared standardization for pca and ica
+    X_std = StandardScaler().fit_transform(X)
 
-    # ica on pca-reduced data: avoids fastica's expensive internal full svd
-    scaler_ica = StandardScaler()
-    X_ica = scaler_ica.fit_transform(X)
-    X_ica_pca = PCA(n_components=n_components, random_state=seed).fit_transform(X_ica)
+    # pca on standardized data
+    pca = PCA(n_components=n_components, random_state=seed)
+    reps["PCA"] = pca.fit_transform(X_std)
+
+    # ica on pca-reduced standardized data
+    X_ica_pca = PCA(n_components=n_components, random_state=seed).fit_transform(X_std)
     ica = FastICA(n_components=n_components, random_state=seed,
                   max_iter=200, whiten=False)
     reps["ICA"] = ica.fit_transform(X_ica_pca)
 
-    # nmf
-    scaler_nmf = MinMaxScaler()
-    X_nmf = np.clip(scaler_nmf.fit_transform(X), 0, None)
+    # nmf: MinMaxScaler + clip on raw X, consistent with run_nmf.py
+    X_nmf = np.clip(MinMaxScaler().fit_transform(X), 0, None)
     nmf = NMF(n_components=n_components, init="nndsvda",
               random_state=seed, max_iter=2000,
               solver="cd", beta_loss="frobenius")
@@ -259,8 +260,17 @@ def main():
                         help="skip categories with fewer val drawings than this")
     parser.add_argument("--n_seeds",      type=int, default=5,
                         help="seeds for subsampled-category averaging")
-    parser.add_argument("--output_path",  default="outputs/geometry_analysis.svg")
+    parser.add_argument("--output_path",  default=None,
+                        help="output svg path (default: outputs/geometry_analysis_{model}.svg)")
     args = parser.parse_args()
+
+    # derive model tag from embeddings filename: "kiddraw_clip_embeddings.npy" → "clip"
+    basename = os.path.splitext(os.path.basename(args.embeddings_path))[0]
+    import re
+    m = re.search(r"kiddraw_(.+?)_embeddings", basename)
+    model_tag = m.group(1) if m else basename
+    if args.output_path is None:
+        args.output_path = f"outputs/geometry_analysis_{model_tag}.svg"
 
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
