@@ -117,11 +117,18 @@ def build_representations(X, n_components, seed):
     reps = {}
     X_std = StandardScaler().fit_transform(X)
     pca = PCA(n_components=n_components, random_state=seed)
-    X_pca = pca.fit_transform(X_std)
-    reps["PCA"] = X_pca
-    # ica on the same pca-reduced data; whiten=False since pca already did it
+    reps["PCA"] = pca.fit_transform(X_std)            # unwhitened pca scores for the pca rep
+    pca_w = PCA(n_components=n_components, whiten=True, random_state=seed)
+    X_pca_w = pca_w.fit_transform(X_std)              # whitened input for ica
     ica = FastICA(random_state=seed, max_iter=200, whiten=False)
-    reps["ICA"] = ica.fit_transform(X_pca)
+    reps["ICA"] = ica.fit_transform(X_pca_w)
+    # X_std = StandardScaler().fit_transform(X)
+    # pca = PCA(n_components=n_components, random_state=seed)
+    # X_pca = pca.fit_transform(X_std)
+    # reps["PCA"] = X_pca
+    # # ica on the same pca-reduced data; whiten=False since pca already did it
+    # ica = FastICA(random_state=seed, max_iter=200, whiten=False)
+    # reps["ICA"] = ica.fit_transform(X_pca)
 
     # nmf: MinMaxScaler + clip on raw X, consistent with run_nmf.py
     X_nmf = np.clip(MinMaxScaler().fit_transform(X), 0, None)
