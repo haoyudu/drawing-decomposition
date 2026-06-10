@@ -2,8 +2,13 @@
 """
 Run ICA on Kiddraw CLIP embeddings (full dataset, no train/test split).
 
-ICA preprocessing matches geometry_analysis.build_representations:
-StandardScaler -> PCA(n_components) -> FastICA(whiten=False).
+ICA path matches geometry_analysis.build_representations (ICA branch), in order:
+
+  1. StandardScaler on CLIP embeddings (per-feature z-score).
+  2. PCA(n_components) on the scaled matrix — dimensionality reduction only;
+     sklearn PCA defaults to whiten=False (no sphering / unit-variance PCA space).
+  3. FastICA on the PCA scores with whiten=False — no additional FastICA internal
+     whitening (avoids FastICA's expensive full-dataset SVD on raw CLIP dims).
 
 Author: L. Kemmelmeier
 """
@@ -38,7 +43,9 @@ metadata_file = os.path.join(data_dir, "kiddraw_clip_metadata.parquet")
 
 n_components = 55
 random_state = 0
-max_iter = 1000
+# FastICA max_iter (geometry_analysis.build_representations uses 200); increase if
+# sklearn emits a ConvergenceWarning on the full corpus.
+ica_max_iter = 200
 n_extreme_images = 20
 
 
@@ -58,26 +65,27 @@ metadata["clean_image_path"] = metadata["clean_filename"].apply(
 print(f"Loaded {X.shape[0]} drawings with {X.shape[1]} CLIP features")
 
 
-#%% scale and PCA pre-step (same pipeline as geometry_analysis.py)
+#%% ICA path — same steps as geometry_analysis.build_representations
 
-scaler = StandardScaler()
+# Step 1: standardize CLIP features (ICA is unstable on arbitrary feature scales).
+scaler_ica = StandardScaler()
+X_ica = scaler_ica.fit_transform(X)
 
-X_scaled = scaler.fit_transform(X)
+# Step 2: PCA on standardized embeddings only (not raw CLIP). Reduces to
+# n_components before FastICA; PCA(..., whiten=False) is sklearn default.
+pca_ica = PCA(n_components=n_components, random_state=random_state)
+X_ica_pca = pca_ica.fit_transform(X_ica)
 
-pca_pre_ica = PCA(n_components=n_components, random_state=random_state)
-X_pca = pca_pre_ica.fit_transform(X_scaled)
-
-
-#%% fit ICA
-
+# Step 3: FastICA on PCA scores; whiten=False — no unit-variance whitening inside
+# FastICA (geometry_analysis uses this so FastICA does not re-whiten the subspace).
 ica = FastICA(
     n_components=n_components,
     random_state=random_state,
-    max_iter=max_iter,
+    max_iter=ica_max_iter,
     whiten=False,
 )
 
-S = ica.fit_transform(X_pca)
+S = ica.fit_transform(X_ica_pca)
 
 
 #%% save ICA outputs
@@ -85,7 +93,7 @@ S = ica.fit_transform(X_pca)
 np.save(os.path.join(out_dir, "S.npy"), S)
 
 np.save(os.path.join(out_dir, "ica_components.npy"), ica.components_)
-np.save(os.path.join(out_dir, "ica_pca_components.npy"), pca_pre_ica.components_)
+np.save(os.path.join(out_dir, "ica_pca_components.npy"), pca_ica.components_)
 
 metadata.to_parquet(os.path.join(out_dir, "metadata.parquet"))
 
@@ -468,6 +476,197 @@ plt.savefig(
     os.path.join(
         category_heatmap_dir,
         "category_component_heatmap_ranked.png",
+    ),
+    dpi=300,
+    bbox_inches="tight",
+)
+
+plt.close()
+
+
+#%% normalized category-component heatmap (within ICA component)
+
+# normalize each ICA component across categories
+# brighter values = categories that rely more heavily on that component
+# relative to other categories
+
+category_component_means_norm = (
+    category_component_means
+    - category_component_means.min(axis=0)
+)
+
+category_component_means_norm = (
+    category_component_means_norm
+    / category_component_means_norm.max(axis=0)
+)
+
+heatmap_df_norm, component_labels_norm = order_category_component_matrix(
+    category_component_means_norm,
+    component_prefix="ica_",
+    use_abs=False,
+)
+
+fig, ax = plt.subplots(figsize=(22, 18))
+
+im = ax.imshow(
+    heatmap_df_norm.values,
+    aspect="auto",
+    interpolation="nearest",
+    vmin=0,
+    vmax=1,
+)
+
+ax.set_yticks(np.arange(len(heatmap_df_norm.index)))
+ax.set_yticklabels(
+    heatmap_df_norm.index,
+    fontsize=18,
+    fontweight="bold",
+)
+
+ax.set_xticks(np.arange(len(heatmap_df_norm.columns)))
+ax.set_xticklabels(
+    component_labels_norm,
+    rotation=90,
+    fontsize=13,
+    fontweight="bold",
+)
+
+ax.set_xlabel(
+    "ICA Component",
+    fontsize=24,
+    fontweight="bold",
+    labelpad=15,
+)
+
+ax.set_ylabel(
+    "Category",
+    fontsize=24,
+    fontweight="bold",
+    labelpad=15,
+)
+
+ax.tick_params(axis="x", length=4, labelsize=13)
+ax.tick_params(axis="y", length=0, labelsize=18)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+cbar = plt.colorbar(
+    im,
+    ax=ax,
+    fraction=0.035,
+    pad=0.02,
+)
+
+cbar.set_label(
+    "Normalized Mean ICA Score",
+    fontsize=20,
+    fontweight="bold",
+    labelpad=15,
+)
+
+cbar.ax.tick_params(labelsize=16)
+
+plt.tight_layout()
+
+plt.savefig(
+    os.path.join(
+        category_heatmap_dir,
+        "category_component_heatmap_normalized.png",
+    ),
+    dpi=300,
+    bbox_inches="tight",
+)
+
+plt.close()
+
+#%% z-scored category-component heatmap (within ICA component)
+
+# z-score each ICA component across categories
+# positive values = category scores higher than average for that component
+# negative values = category scores lower than average for that component
+
+category_component_means_z = (
+    category_component_means
+    - category_component_means.mean(axis=0)
+) / category_component_means.std(axis=0)
+
+heatmap_df_z, component_labels_z = order_category_component_matrix(
+    category_component_means_z,
+    component_prefix="ica_",
+    use_abs=False,
+)
+
+fig, ax = plt.subplots(figsize=(22, 18))
+
+vmax = np.nanmax(np.abs(heatmap_df_z.values))
+
+im = ax.imshow(
+    heatmap_df_z.values,
+    aspect="auto",
+    interpolation="nearest",
+    cmap="coolwarm",
+    vmin=-vmax,
+    vmax=vmax,
+)
+
+ax.set_yticks(np.arange(len(heatmap_df_z.index)))
+ax.set_yticklabels(
+    heatmap_df_z.index,
+    fontsize=18,
+    fontweight="bold",
+)
+
+ax.set_xticks(np.arange(len(heatmap_df_z.columns)))
+ax.set_xticklabels(
+    component_labels_z,
+    rotation=90,
+    fontsize=13,
+    fontweight="bold",
+)
+
+ax.set_xlabel(
+    "ICA Component",
+    fontsize=24,
+    fontweight="bold",
+    labelpad=15,
+)
+
+ax.set_ylabel(
+    "Category",
+    fontsize=24,
+    fontweight="bold",
+    labelpad=15,
+)
+
+ax.tick_params(axis="x", length=4, labelsize=13)
+ax.tick_params(axis="y", length=0, labelsize=18)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+cbar = plt.colorbar(
+    im,
+    ax=ax,
+    fraction=0.035,
+    pad=0.02,
+)
+
+cbar.set_label(
+    "Z-scored Mean ICA Score",
+    fontsize=20,
+    fontweight="bold",
+    labelpad=15,
+)
+
+cbar.ax.tick_params(labelsize=16)
+
+plt.tight_layout()
+
+plt.savefig(
+    os.path.join(
+        category_heatmap_dir,
+        "category_component_heatmap_zscore.png",
     ),
     dpi=300,
     bbox_inches="tight",

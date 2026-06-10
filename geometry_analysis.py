@@ -110,8 +110,8 @@ def build_representations(X, n_components, seed):
     fit pca, ica, nmf on X and return dict of reduced arrays (same row order as X).
 
     preprocessing follows existing scripts:
-      ica — StandardScaler then FastICA(whiten="unit-variance")  [run_ica.py]
-      nmf — MinMaxScaler then clip(0, inf)                       [run_nmf.py]
+      ica — StandardScaler, PCA(n_components), FastICA(whiten=False)  [run_ica.py]
+      nmf — MinMaxScaler then clip(0, inf)                             [run_nmf.py]
     """
     reps = {}
 
