@@ -88,6 +88,31 @@ ica = FastICA(
 S = ica.fit_transform(X_ica_pca)
 
 
+#%% variance retained by PCA preprocessing
+
+variance_explained = pca_ica.explained_variance_ratio_
+cumulative_variance = variance_explained.sum()
+
+print(
+    f"{n_components} PCA components retain "
+    f"{cumulative_variance*100:.2f}% of total variance"
+)
+
+variance_df = pd.DataFrame({
+    "component": np.arange(1, n_components + 1),
+    "variance_explained": variance_explained,
+    "cumulative_variance": np.cumsum(variance_explained),
+})
+
+variance_df.to_csv(
+    os.path.join(
+        out_dir,
+        "ica_pca_variance_explained.csv",
+    ),
+    index=False,
+)
+
+
 #%% save ICA outputs
 
 np.save(os.path.join(out_dir, "S.npy"), S)

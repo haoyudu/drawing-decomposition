@@ -88,6 +88,43 @@ W = nmf.fit_transform(X_scaled)
 print(f"NMF reconstruction error: {nmf.reconstruction_err_:.4f}")
 
 
+#%% NMF reconstruction variance explained
+
+X_reconstructed = nmf.inverse_transform(W)
+
+ss_res = np.sum((X_scaled - X_reconstructed) ** 2)
+ss_tot = np.sum((X_scaled - X_scaled.mean()) ** 2)
+
+reconstruction_r2 = 1 - (ss_res / ss_tot)
+
+print(
+    f"NMF reconstruction R²: "
+    f"{reconstruction_r2:.4f} "
+    f"({reconstruction_r2*100:.2f}% variance explained)"
+)
+
+reconstruction_df = pd.DataFrame({
+    "metric": [
+        "reconstruction_error",
+        "reconstruction_r2",
+        "percent_variance_explained",
+    ],
+    "value": [
+        nmf.reconstruction_err_,
+        reconstruction_r2,
+        reconstruction_r2 * 100,
+    ],
+})
+
+reconstruction_df.to_csv(
+    os.path.join(
+        out_dir,
+        "nmf_reconstruction_summary.csv",
+    ),
+    index=False,
+)
+
+
 #%% save NMF outputs
 
 np.save(os.path.join(out_dir, "W.npy"), W)
